@@ -28,10 +28,16 @@ def init_db() -> None:
                 username TEXT,
                 full_name TEXT,
                 watched_count INTEGER NOT NULL DEFAULT 0,
+                is_blocked INTEGER NOT NULL DEFAULT 0,
                 first_seen TEXT DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
+        # Eski bazalarda "users" jadvali is_blocked ustunisiz yaratilgan bo'lishi
+        # mumkin, shuning uchun bu yerda migratsiya qilamiz.
+        existing_cols = [row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()]
+        if "is_blocked" not in existing_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN is_blocked INTEGER NOT NULL DEFAULT 0")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS movies (
@@ -113,6 +119,32 @@ def count_users() -> int:
     with closing(_connect()) as conn:
         cur = conn.execute("SELECT COUNT(*) AS c FROM users")
         return cur.fetchone()["c"]
+
+
+def get_all_user_ids() -> list[int]:
+    """Xabar (broadcast) yuborish uchun barcha foydalanuvchilar ID ro'yxati."""
+    with closing(_connect()) as conn:
+        cur = conn.execute("SELECT user_id FROM users")
+        return [row["user_id"] for row in cur.fetchall()]
+
+
+def is_user_blocked(user_id: int) -> bool:
+    with closing(_connect()) as conn:
+        cur = conn.execute("SELECT is_blocked FROM users WHERE user_id = ?", (user_id,))
+        row = cur.fetchone()
+        return bool(row["is_blocked"]) if row else False
+
+
+def block_user(user_id: int) -> None:
+    with closing(_connect()) as conn:
+        conn.execute("UPDATE users SET is_blocked = 1 WHERE user_id = ?", (user_id,))
+        conn.commit()
+
+
+def unblock_user(user_id: int) -> None:
+    with closing(_connect()) as conn:
+        conn.execute("UPDATE users SET is_blocked = 0 WHERE user_id = ?", (user_id,))
+        conn.commit()
 
 
 # ---------- Kinolar / seriallar ----------

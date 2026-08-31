@@ -10,7 +10,7 @@ from aiogram.types import (
 )
 
 import database as db
-from config import ADMIN_IDS, ADMIN_USERNAME, CHANNEL_USERNAME
+from config import ADMIN_USERNAME, CHANNEL_USERNAME
 
 router = Router()
 
@@ -57,12 +57,13 @@ def subscribe_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def main_menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
-    bottom_row = [InlineKeyboardButton(text="📢 Reklama", url=_admin_link())]
-    if is_admin:
-        bottom_row.append(
-            InlineKeyboardButton(text="⚙️ Admin panel", callback_data="admin_panel")
-        )
+def main_menu_keyboard() -> InlineKeyboardMarkup:
+    # Admin panel tugmasi barcha foydalanuvchilarga ko'rinadi, lekin uni bosganda
+    # faqat admin ma'lumotlarni ko'radi (pastdagi admin_panel_denied handleriga qarang).
+    bottom_row = [
+        InlineKeyboardButton(text="📢 Reklama", url=_admin_link()),
+        InlineKeyboardButton(text="⚙️ Admin panel", callback_data="admin_panel"),
+    ]
 
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -100,7 +101,7 @@ async def send_welcome(bot: Bot, chat_id: int, user_id: int) -> None:
         chat_id=chat_id,
         photo=photo,
         caption=WELCOME_TEXT,
-        reply_markup=main_menu_keyboard(is_admin=user_id in ADMIN_IDS),
+        reply_markup=main_menu_keyboard(),
     )
 
 
@@ -126,6 +127,14 @@ async def check_subscription(callback: CallbackQuery, bot: Bot) -> None:
         await send_welcome(bot, callback.message.chat.id, user_id)
     else:
         await callback.answer("❌ Siz hali kanalga a'zo bo'lmagansiz!", show_alert=True)
+
+
+@router.callback_query(F.data == "admin_panel")
+async def admin_panel_denied(callback: CallbackQuery) -> None:
+    # Bu handlerga faqat admin bo'lmagan foydalanuvchilar yetib keladi,
+    # chunki asosiy "admin_panel" handleri admin_handlers.py da bo'lib,
+    # u faqat ADMIN_IDS uchun ishlaydi va birinchi bo'lib ro'yxatdan o'tgan.
+    await callback.answer("🚫 Bu bo'lim faqat administratorlar uchun mo'ljallangan.", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("part:"))

@@ -80,6 +80,16 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def after_movie_keyboard() -> InlineKeyboardMarkup:
+    # Kino/qism yuborilgandan so'ng uning tagida chiqadigan tugma —
+    # foydalanuvchini kanalga taklif qiladi.
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📢 Kanalga a'zo bo'ling", url=_channel_link())],
+        ]
+    )
+
+
 def series_parts_keyboard(code: str, parts: list) -> InlineKeyboardMarkup:
     buttons = [
         InlineKeyboardButton(
@@ -153,7 +163,11 @@ async def send_series_part(callback: CallbackQuery, bot: Bot) -> None:
         return
 
     await callback.answer()
-    await bot.send_video(chat_id=callback.message.chat.id, video=row["file_id"])
+    await bot.send_video(
+        chat_id=callback.message.chat.id,
+        video=row["file_id"],
+        reply_markup=after_movie_keyboard(),
+    )
     db.increment_views(code)
     db.increment_watched(callback.from_user.id)
 
@@ -179,6 +193,7 @@ async def handle_film_code(message: Message, bot: Bot) -> None:
             chat_id=message.chat.id,
             video=movie["file_id"],
             caption=movie["caption"] or None,
+            reply_markup=after_movie_keyboard(),
         )
         db.increment_views(code)
         db.increment_watched(user_id)

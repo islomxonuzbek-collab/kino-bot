@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime
 from html import escape
 
 from aiogram import Router, F, Bot
@@ -22,6 +23,14 @@ router = Router()
 
 class MovieRequest(StatesGroup):
     waiting_text = State()
+
+
+class MovieReview(StatesGroup):
+    waiting_movie_name = State()
+    waiting_comment = State()
+
+
+REVIEWS_PAGE_SIZE = 5
 
 WELCOME_PHOTO = "assets/welcome.jpg"
 
@@ -74,6 +83,26 @@ REQUEST_MOVIE_THANKS_TEXT = (
     f'{_pe("✅", "5864038172010222653")} So\'rovingiz qabul qilindi! Tez orada ko\'rib chiqamiz.'
 )
 
+REVIEWS_EMPTY_TEXT = (
+    f'{_pe("💬", "5343726841427405712")} Hozircha hech kim fikr qoldirmagan.\n\n'
+    "Birinchi bo'lib fikr bildiring!"
+)
+
+REVIEWS_TITLE_TEXT = f'{_pe("💬", "5343726841427405712")} <b>Fikrlar</b>\n\n'
+
+REVIEW_PROMPT_MOVIE_NAME_TEXT = (
+    f'{_pe("🎬", "5375464961822695044")} Qaysi kino yoki serial haqida fikr bildirmoqchisiz?\n'
+    "Nomini yozib yuboring:"
+)
+
+REVIEW_PROMPT_COMMENT_TEXT = (
+    f'{_pe("✍️", "5343726841427405712")} Endi shu kino/serial haqida fikringizni yozing:'
+)
+
+REVIEW_THANKS_TEXT = (
+    f'{_pe("✅", "5864038172010222653")} Fikringiz uchun rahmat!'
+)
+
 
 def _channel_link() -> str:
     return f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
@@ -98,6 +127,9 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
     request_row = [
         InlineKeyboardButton(text="🎥 Qanday kino kerak?", callback_data="request_movie"),
     ]
+    reviews_row = [
+        InlineKeyboardButton(text="💬 Fikrlar", callback_data="reviews_page:0"),
+    ]
     bottom_row = [
         InlineKeyboardButton(text="📢 Reklama", url=_admin_link()),
         InlineKeyboardButton(text="⚙️ Admin panel", callback_data="admin_panel"),
@@ -107,6 +139,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="🎬 Kino kodlari", url=_channel_link())],
             request_row,
+            reviews_row,
             bottom_row,
         ]
     )
@@ -128,6 +161,52 @@ def after_movie_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="📢 Kanalga a'zo bo'ling", url=_channel_link())],
         ]
     )
+
+
+def reviews_keyboard(page: int, has_prev: bool, has_next: bool) -> InlineKeyboardMarkup:
+    nav_row = []
+    if has_prev:
+        nav_row.append(InlineKeyboardButton(text="‹ Orqaga", callback_data=f"reviews_page:{page - 1}"))
+    if has_next:
+        nav_row.append(InlineKeyboardButton(text="Keyingi ›", callback_data=f"reviews_page:{page + 1}"))
+
+    keyboard = [[InlineKeyboardButton(text="✍️ Fikr qoldirish", callback_data="add_review")]]
+    if nav_row:
+        keyboard.append(nav_row)
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def _format_review_date(created_at: str) -> str:
+    """Sana matnini 'bugun' / 'kecha' / dd.mm.yyyy ko'rinishida qaytaradi."""
+    try:
+        created = datetime.strptime(created_at.split(".")[0], "%Y-%m-%d %H:%M:%S")
+    except (ValueError, AttributeError):
+        return ""
+
+    today = datetime.now().date()
+    created_date = created.date()
+    if created_date == today:
+        return "bugun"
+    if (today - created_date).days == 1:
+        return "kecha"
+    return created_date.strftime("%d.%m.%Y")
+
+
+def _format_reviews_page(reviews: list, page: int, total: int) -> str:
+    lines = [REVIEWS_TITLE_TEXT.rstrip("\n")]
+    for row in reviews:
+        display_name = f"@{row['username']}" if row["username"] else escape(row["full_name"] or "Mijoz")
+        date_text = _format_review_date(row["created_at"])
+        lines.append("")
+        lines.append(f'{_pe("🎬", "5375464961822695044")} <b>{escape(row["movie_name"])}</b>')
+        suffix = f" · <i>{date_text}</i>" if date_text else ""
+        lines.append(f'{display_name}{suffix}')
+        lines.append(f'“{escape(row["comment_text"])}”')
+
+    total_pages = max(1, (total + REVIEWS_PAGE_SIZE - 1) // REVIEWS_PAGE_SIZE)
+    lines.append("")
+    lines.append(f"<i>Sahifa {page + 1}/{total_pages}</i>")
+    return "\n".join(lines)
 
 
 def series_parts_keyboard(code: str, parts: list) -> InlineKeyboardMarkup:
@@ -279,6 +358,106 @@ async def leave_request_comment_start(callback: CallbackQuery, state: FSMContext
     await callback.answer()
     await state.set_state(MovieRequest.waiting_text)
     await callback.message.answer(REQUEST_MOVIE_PROMPT_TEXT)
+
+
+@router.callback_query(F.data.startswith("reviews_page:"))
+async def show_reviews_page(callback: CallbackQuery) -> None:
+    if db.is_user_blocked(callback.from_user.id):
+        await callback.answer(BLOCKED_TEXT, show_alert=True)
+        return
+
+    page = int(callback.data.split(":", 1)[1])
+    total = db.count_movie_reviews()
+
+    if total == 0:
+        await callback.answer()
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="✍️ Fikr qoldirish", callback_data="add_review")]]
+        )
+        if callback.message.text is not None:
+            try:
+                await callback.message.edit_text(REVIEWS_EMPTY_TEXT, reply_markup=keyboard)
+                return
+            except TelegramBadRequest:
+                pass
+        await callback.message.answer(REVIEWS_EMPTY_TEXT, reply_markup=keyboard)
+        return
+
+    total_pages = max(1, (total + REVIEWS_PAGE_SIZE - 1) // REVIEWS_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+
+    reviews = db.get_movie_reviews_page(offset=page * REVIEWS_PAGE_SIZE, limit=REVIEWS_PAGE_SIZE)
+    text = _format_reviews_page(reviews, page, total)
+    keyboard = reviews_keyboard(page, has_prev=page > 0, has_next=(page + 1) < total_pages)
+
+    await callback.answer()
+    if callback.message.text is not None:
+        try:
+            await callback.message.edit_text(text, reply_markup=keyboard)
+            return
+        except TelegramBadRequest:
+            pass
+    await callback.message.answer(text, reply_markup=keyboard)
+
+
+@router.callback_query(F.data == "add_review")
+async def add_review_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if db.is_user_blocked(callback.from_user.id):
+        await callback.answer(BLOCKED_TEXT, show_alert=True)
+        return
+
+    await callback.answer()
+    await state.set_state(MovieReview.waiting_movie_name)
+    await callback.message.answer(REVIEW_PROMPT_MOVIE_NAME_TEXT)
+
+
+@router.message(StateFilter(MovieReview.waiting_movie_name))
+async def add_review_movie_name(message: Message, state: FSMContext) -> None:
+    if db.is_user_blocked(message.from_user.id):
+        await state.clear()
+        await message.answer(BLOCKED_TEXT)
+        return
+
+    movie_name = (message.text or "").strip()
+    if not movie_name:
+        await message.answer("❌ Iltimos, kino yoki serial nomini matn shaklida yozing.")
+        return
+
+    await state.update_data(movie_name=movie_name)
+    await state.set_state(MovieReview.waiting_comment)
+    await message.answer(REVIEW_PROMPT_COMMENT_TEXT)
+
+
+@router.message(StateFilter(MovieReview.waiting_comment))
+async def add_review_comment(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    await state.clear()
+
+    if db.is_user_blocked(message.from_user.id):
+        await message.answer(BLOCKED_TEXT)
+        return
+
+    comment_text = (message.text or "").strip()
+    if not comment_text:
+        await message.answer("❌ Iltimos, fikringizni matn shaklida yozing.")
+        return
+
+    movie_name = data.get("movie_name", "").strip()
+    if not movie_name:
+        await message.answer("❌ Xatolik yuz berdi, qaytadan urinib ko'ring.")
+        return
+
+    user = message.from_user
+    db.add_movie_review(user.id, user.username, user.full_name, movie_name, comment_text)
+
+    await message.answer(REVIEW_THANKS_TEXT)
+
+    total = db.count_movie_reviews()
+    reviews = db.get_movie_reviews_page(offset=0, limit=REVIEWS_PAGE_SIZE)
+    total_pages = max(1, (total + REVIEWS_PAGE_SIZE - 1) // REVIEWS_PAGE_SIZE)
+    text = _format_reviews_page(reviews, 0, total)
+    keyboard = reviews_keyboard(0, has_prev=False, has_next=total_pages > 1)
+    await message.answer(text, reply_markup=keyboard)
 
 
 async def _notify_admins_about_request(bot: Bot, user, text: str) -> None:

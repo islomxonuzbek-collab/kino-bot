@@ -37,8 +37,10 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
 def add_content_type_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🎬 Film joylash", callback_data="add_film")],
-            [InlineKeyboardButton(text="📺 Serial joylash", callback_data="add_serial")],
+            [
+                InlineKeyboardButton(text="🎬 Film joylash", callback_data="add_film"),
+                InlineKeyboardButton(text="📺 Serial joylash", callback_data="add_serial"),
+            ],
         ]
     )
 
@@ -47,6 +49,14 @@ def users_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🔍 ID orqali qidirish", callback_data="admin_search_user")],
+        ]
+    )
+
+
+def cancel_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Bekor qilish", callback_data="admin_cancel")],
         ]
     )
 
@@ -108,6 +118,23 @@ async def admin_search_user_result(message: Message, state: FSMContext) -> None:
     )
 
 
+# ---------- Bekor qilish ----------
+
+@router.callback_query(F.data == "admin_cancel", StateFilter("*"))
+async def admin_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    current_state = await state.get_state()
+    await state.clear()
+    await callback.answer("❌ Bekor qilindi")
+
+    if current_state is None:
+        return
+
+    await callback.message.answer(
+        "❌ Amal bekor qilindi.\n\n⚙️ <b>Admin panel</b>\n\nKerakli bo'limni tanlang:",
+        reply_markup=admin_panel_keyboard(),
+    )
+
+
 # ---------- Kino joylash ----------
 
 @router.callback_query(F.data == "admin_add_content")
@@ -121,21 +148,30 @@ async def admin_add_content(callback: CallbackQuery, state: FSMContext) -> None:
 async def add_film_start(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await state.set_state(AddContent.waiting_film_code)
-    await callback.message.answer("🎟️ Film uchun kod raqamini kiriting (masalan: 125):")
+    await callback.message.answer(
+        "🎟️ Film uchun kod raqamini kiriting (masalan: 125):",
+        reply_markup=cancel_keyboard(),
+    )
 
 
 @router.message(StateFilter(AddContent.waiting_film_code))
 async def add_film_code(message: Message, state: FSMContext) -> None:
     code = (message.text or "").strip()
     if not code:
-        await message.answer("❌ Kod bo'sh bo'lishi mumkin emas. Qaytadan kiriting:")
+        await message.answer(
+            "❌ Kod bo'sh bo'lishi mumkin emas. Qaytadan kiriting:",
+            reply_markup=cancel_keyboard(),
+        )
         return
     if db.code_exists(code):
         await message.answer("⚠️ Bu kod band. Boshqa kod kiriting yoki mavjud filmni qayta yuborsangiz, u yangilanadi.")
 
     await state.update_data(code=code)
     await state.set_state(AddContent.waiting_film_video)
-    await message.answer("🎬 Endi filmni video va izoh (caption) bilan birga yuboring:")
+    await message.answer(
+        "🎬 Endi filmni video va izoh (caption) bilan birga yuboring:",
+        reply_markup=cancel_keyboard(),
+    )
 
 
 @router.message(StateFilter(AddContent.waiting_film_video), F.video)
@@ -150,21 +186,30 @@ async def add_film_video(message: Message, state: FSMContext) -> None:
 
 @router.message(StateFilter(AddContent.waiting_film_video))
 async def add_film_video_invalid(message: Message) -> None:
-    await message.answer("❌ Iltimos, video (film) yuboring.")
+    await message.answer(
+        "❌ Iltimos, video (film) yuboring.",
+        reply_markup=cancel_keyboard(),
+    )
 
 
 @router.callback_query(F.data == "add_serial")
 async def add_serial_start(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await state.set_state(AddContent.waiting_serial_code)
-    await callback.message.answer("🎟️ Serial uchun kod raqamini kiriting (masalan: 200):")
+    await callback.message.answer(
+        "🎟️ Serial uchun kod raqamini kiriting (masalan: 200):",
+        reply_markup=cancel_keyboard(),
+    )
 
 
 @router.message(StateFilter(AddContent.waiting_serial_code))
 async def add_serial_code(message: Message, state: FSMContext) -> None:
     code = (message.text or "").strip()
     if not code:
-        await message.answer("❌ Kod bo'sh bo'lishi mumkin emas. Qaytadan kiriting:")
+        await message.answer(
+            "❌ Kod bo'sh bo'lishi mumkin emas. Qaytadan kiriting:",
+            reply_markup=cancel_keyboard(),
+        )
         return
 
     db.create_serial(code)
@@ -175,7 +220,8 @@ async def add_serial_code(message: Message, state: FSMContext) -> None:
     await state.update_data(next_part=next_part)
     await message.answer(
         f"📺 <b>{next_part}-qism</b> videosini yuboring.\n"
-        f"Barcha qismlarni joylab bo'lgach, /done deb yozing."
+        f"Barcha qismlarni joylab bo'lgach, /done deb yozing.",
+        reply_markup=cancel_keyboard(),
     )
 
 
@@ -198,13 +244,17 @@ async def add_serial_part(message: Message, state: FSMContext) -> None:
     await state.update_data(next_part=part_number + 1)
     await message.answer(
         f"✅ {part_number}-qism saqlandi.\n"
-        f"Keyingi ({part_number + 1}-qism) videoni yuboring yoki /done deb yozing."
+        f"Keyingi ({part_number + 1}-qism) videoni yuboring yoki /done deb yozing.",
+        reply_markup=cancel_keyboard(),
     )
 
 
 @router.message(StateFilter(AddContent.waiting_serial_part))
 async def add_serial_part_invalid(message: Message) -> None:
-    await message.answer("❌ Iltimos, video yuboring yoki tugatish uchun /done deb yozing.")
+    await message.answer(
+        "❌ Iltimos, video yuboring yoki tugatish uchun /done deb yozing.",
+        reply_markup=cancel_keyboard(),
+    )
 
 
 # ---------- Statistika ----------

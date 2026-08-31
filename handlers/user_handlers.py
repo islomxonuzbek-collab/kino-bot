@@ -16,26 +16,33 @@ router = Router()
 
 WELCOME_PHOTO = "assets/welcome.jpg"
 
+
+def _pe(emoji: str, emoji_id: str) -> str:
+    """Premium custom emojini HTML tg-emoji tegi bilan qaytaradi."""
+    return f'<tg-emoji emoji-id="{emoji_id}">{emoji}</tg-emoji>'
+
+
 WELCOME_TEXT = (
-    "🎬 <b>ZANGORAFILM</b> ga xush kelibsiz! 🍿\n"
-    "Assalomu alaykum! 👋\n\n"
+    f'{_pe("🎬", "5375464961822695044")} <b>ZANGORAFILM</b> ga xush kelibsiz! '
+    f'{_pe("🍿", "5371081166013078244")}\n'
+    f'Assalomu alaykum! {_pe("👋", "5859691201250201986")}\n\n'
     "Siz izlagan kino va seriallarni bizning bot orqali tez va oson "
-    "topishingiz mumkin. 🎞️\n"
-    "🔎 Kino kodini qidirish uchun pastdagi tugmalardan foydalaning.\n"
-    "🎟️ Kino kodini kiriting:\n\n"
+    f'topishingiz mumkin. {_pe("🎞️", "5188311512791393083")}\n'
+    f'{_pe("🔎", "5377599075237502153")} Kino kodini qidirish uchun pastdagi tugmalardan foydalaning.\n'
+    f'{_pe("🎟️", "5463297803235113601")} Kino kodini kiriting:\n\n'
     "Masalan: <code>125</code>\n"
-    "✨ Kino kodini yozing va kerakli filmingizni bir zumda toping!\n\n"
-    "❤️ ZANGORAFILM — Sifatli kino, maroqli tomosha!"
+    f'{_pe("✨", "5343726841427405712")} Kino kodini yozing va kerakli filmingizni bir zumda toping!\n\n'
+    f'{_pe("❤️", "5861735798956627072")} ZANGORAFILM — Sifatli kino, maroqli tomosha!'
 )
 
 JOIN_TEXT = (
-    "👋 <b>Salom!</b>\n\n"
+    f'{_pe("👋", "5859691201250201986")} <b>Salom!</b>\n\n'
     "Botdan foydalanish uchun avval quyidagi kanalimizga a'zo bo'ling, "
-    "so'ngra <b>✅ Tekshirish</b> tugmasini bosing."
+    f'so\'ngra <b>{_pe("✅", "5864038172010222653")} Tekshirish</b> tugmasini bosing.'
 )
 
 CODE_NOT_FOUND_TEXT = (
-    "😕 Bunday kodli kino yoki serial topilmadi.\n"
+    f'{_pe("😕", "5375533492320880898")} Bunday kodli kino yoki serial topilmadi.\n'
     "Kodni tekshirib, qaytadan yuboring."
 )
 
@@ -181,6 +188,7 @@ async def handle_film_code(message: Message, bot: Bot) -> None:
             await message.answer(CODE_NOT_FOUND_TEXT)
             return
         await message.answer(
-            movie["caption"] or f"📺 Serial — kod: <code>{code}</code>\nQismni tanlang:",
+            movie["caption"]
+            or f'{_pe("📺", "5373330964372004748")} Serial — kod: <code>{code}</code>\nQismni tanlang:',
             reply_markup=series_parts_keyboard(code, parts),
         )

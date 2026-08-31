@@ -423,13 +423,15 @@ async def admin_stats(callback: CallbackQuery) -> None:
     counts = db.count_movies()
     total_users = db.count_users()
     total_views = db.total_views()
+    total_requests = db.count_movie_requests()
 
     text = (
         "📊 <b>Statistika</b>\n\n"
         f"👥 Foydalanuvchilar: <b>{total_users}</b>\n"
         f"🎬 Filmlar soni: <b>{counts['film']}</b>\n"
         f"📺 Seriallar soni: <b>{counts['serial']}</b>\n"
-        f"👁 Jami ko'rishlar/yuklab olishlar: <b>{total_views}</b>"
+        f"👁 Jami ko'rishlar/yuklab olishlar: <b>{total_views}</b>\n"
+        f"🎥 Kino/serial so'rovlari: <b>{total_requests}</b>"
     )
     await callback.message.answer(text)
 

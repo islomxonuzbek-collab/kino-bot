@@ -1,6 +1,11 @@
+import asyncio
+from html import escape
+
 from aiogram import Router, F, Bot
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     CallbackQuery,
     FSInputFile,
@@ -13,6 +18,10 @@ import database as db
 from config import ADMIN_USERNAME, CHANNEL_USERNAME
 
 router = Router()
+
+
+class MovieRequest(StatesGroup):
+    waiting_text = State()
 
 WELCOME_PHOTO = "assets/welcome.jpg"
 
@@ -51,6 +60,20 @@ BLOCKED_TEXT = (
     "Savol yoki e'tiroz bo'lsa, administratsiyaga murojaat qiling."
 )
 
+REQUEST_MOVIE_TEXT = (
+    f'{_pe("🎥", "5375464961822695044")} <b>Qanaqa kino yoki serial xohlaysiz?</b>\n\n'
+    f'{_pe("👇", "5859691201250201986")} Pastdagi tugmani bosing va o\'zingiz izlayotgan '
+    "kino yoki serial nomini yozib yuboring."
+)
+
+REQUEST_MOVIE_PROMPT_TEXT = (
+    f'{_pe("💬", "5343726841427405712")} Qanaqa kino yoki serial kerakligini yozib yuboring:'
+)
+
+REQUEST_MOVIE_THANKS_TEXT = (
+    f'{_pe("✅", "5864038172010222653")} So\'rovingiz qabul qilindi! Tez orada ko\'rib chiqamiz.'
+)
+
 
 def _channel_link() -> str:
     return f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
@@ -72,6 +95,9 @@ def subscribe_keyboard() -> InlineKeyboardMarkup:
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     # Admin panel tugmasi barcha foydalanuvchilarga ko'rinadi, lekin uni bosganda
     # faqat admin ma'lumotlarni ko'radi (pastdagi admin_panel_denied handleriga qarang).
+    request_row = [
+        InlineKeyboardButton(text="🎥 Qanday kino kerak?", callback_data="request_movie"),
+    ]
     bottom_row = [
         InlineKeyboardButton(text="📢 Reklama", url=_admin_link()),
         InlineKeyboardButton(text="⚙️ Admin panel", callback_data="admin_panel"),
@@ -80,7 +106,16 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🎬 Kino kodlari", url=_channel_link())],
+            request_row,
             bottom_row,
+        ]
+    )
+
+
+def request_movie_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💬 Izoh qoldirish", callback_data="leave_request_comment")],
         ]
     )
 
@@ -222,6 +257,85 @@ async def send_series_part(callback: CallbackQuery, bot: Bot) -> None:
     )
     db.increment_views(code)
     db.increment_watched(callback.from_user.id)
+
+
+@router.callback_query(F.data == "request_movie")
+async def request_movie(callback: CallbackQuery, state: FSMContext) -> None:
+    if db.is_user_blocked(callback.from_user.id):
+        await callback.answer(BLOCKED_TEXT, show_alert=True)
+        return
+
+    await state.clear()
+    await callback.answer()
+    await callback.message.answer(REQUEST_MOVIE_TEXT, reply_markup=request_movie_keyboard())
+
+
+@router.callback_query(F.data == "leave_request_comment")
+async def leave_request_comment_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if db.is_user_blocked(callback.from_user.id):
+        await callback.answer(BLOCKED_TEXT, show_alert=True)
+        return
+
+    await callback.answer()
+    await state.set_state(MovieRequest.waiting_text)
+    await callback.message.answer(REQUEST_MOVIE_PROMPT_TEXT)
+
+
+async def _notify_admins_about_request(bot: Bot, user, text: str) -> None:
+    username = f"@{user.username}" if user.username else "yo'q"
+    notify_text = (
+        f'{_pe("🎥", "5375464961822695044")} <b>Yangi kino/serial so\'rovi!</b>\n\n'
+        f"👤 Ism: {escape(user.full_name or '')}\n"
+        f"📛 Username: {username}\n"
+        f"🆔 ID: <code>{user.id}</code>\n\n"
+        f"💬 So'rov: {escape(text)}"
+    )
+    for admin_id in db.list_admins():
+        try:
+            await bot.send_message(admin_id, notify_text)
+        except Exception:
+            pass
+
+
+async def _broadcast_request_to_users(bot: Bot, user, text: str) -> None:
+    display_name = f"@{user.username}" if user.username else escape(user.full_name or "Foydalanuvchi")
+    broadcast_text = (
+        f'{_pe("🎥", "5375464961822695044")} <b>Kino/serial so\'rovi</b>\n\n'
+        f"{display_name} shu kino yoki serialni so'ramoqda:\n"
+        f"💬 <i>{escape(text)}</i>\n\n"
+        f'{_pe("✨", "5343726841427405712")} Agar sizda ham shu kabi kino topilsa yoki '
+        "shu kinoni siz ham xohlasangiz, kanaldan kuzatib boring!"
+    )
+    for uid in db.get_all_user_ids():
+        if uid == user.id or db.is_user_blocked(uid):
+            continue
+        try:
+            await bot.send_message(uid, broadcast_text)
+        except Exception:
+            pass
+        await asyncio.sleep(0.05)  # Telegram flood-limitiga tushib qolmaslik uchun
+
+
+@router.message(StateFilter(MovieRequest.waiting_text))
+async def leave_request_comment_save(message: Message, state: FSMContext, bot: Bot) -> None:
+    await state.clear()
+
+    if db.is_user_blocked(message.from_user.id):
+        await message.answer(BLOCKED_TEXT)
+        return
+
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("❌ Iltimos, matn shaklida yozing va qaytadan yuboring.")
+        return
+
+    user = message.from_user
+    db.add_movie_request(user.id, user.username, user.full_name, text)
+
+    await _notify_admins_about_request(bot, user, text)
+    await _broadcast_request_to_users(bot, user, text)
+
+    await message.answer(REQUEST_MOVIE_THANKS_TEXT)
 
 
 @router.message(F.text & ~F.text.startswith("/"))

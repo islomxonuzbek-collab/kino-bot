@@ -46,6 +46,11 @@ CODE_NOT_FOUND_TEXT = (
     "Kodni tekshirib, qaytadan yuboring."
 )
 
+BLOCKED_TEXT = (
+    "🚫 Siz botdan foydalanish huquqidan mahrum qilingansiz.\n"
+    "Savol yoki e'tiroz bo'lsa, administratsiyaga murojaat qiling."
+)
+
 
 def _channel_link() -> str:
     return f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
@@ -112,6 +117,37 @@ async def is_subscribed(bot: Bot, user_id: int) -> bool:
         return False
 
 
+def _user_block_keyboard(user_id: int, blocked: bool) -> InlineKeyboardMarkup:
+    if blocked:
+        text, cb = "✅ Blokdan chiqarish", f"admin_unblock:{user_id}"
+    else:
+        text, cb = "🚫 Botdan bloklash", f"admin_block:{user_id}"
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=text, callback_data=cb)]])
+
+
+async def notify_admins_about_start(bot: Bot, user) -> None:
+    """Bot start bosilganda barcha adminlarga foydalanuvchi haqida to'liq
+    ma'lumot yuboradi, tagida bloklash tugmasi bilan."""
+    username = f"@{user.username}" if user.username else "yo'q"
+    text = (
+        "🆕 <b>Foydalanuvchi botga kirdi</b>\n\n"
+        f"🆔 ID: <code>{user.id}</code>\n"
+        f"👤 Ism: {user.full_name}\n"
+        f"📛 Username: {username}\n"
+        f"🌐 Til: {user.language_code or 'nomaʼlum'}\n"
+        f"🔗 Profil: <a href=\"tg://user?id={user.id}\">havola</a>"
+    )
+    keyboard = _user_block_keyboard(user.id, blocked=False)
+    for admin_id in db.list_admins():
+        if admin_id == user.id:
+            continue
+        try:
+            await bot.send_message(admin_id, text, reply_markup=keyboard)
+        except Exception:
+            # Admin botni bloklagan yoki hali /start bosmagan bo'lishi mumkin
+            pass
+
+
 async def send_welcome(bot: Bot, chat_id: int, user_id: int) -> None:
     photo = FSInputFile(WELCOME_PHOTO)
     await bot.send_photo(
@@ -126,6 +162,13 @@ async def send_welcome(bot: Bot, chat_id: int, user_id: int) -> None:
 async def cmd_start(message: Message, bot: Bot) -> None:
     user_id = message.from_user.id
     db.touch_user(user_id, message.from_user.username, message.from_user.full_name)
+
+    if db.is_user_blocked(user_id):
+        await message.answer(BLOCKED_TEXT)
+        return
+
+    await notify_admins_about_start(bot, message.from_user)
+
     if await is_subscribed(bot, user_id):
         await send_welcome(bot, message.chat.id, user_id)
     else:
@@ -135,6 +178,11 @@ async def cmd_start(message: Message, bot: Bot) -> None:
 @router.callback_query(F.data == "check_sub")
 async def check_subscription(callback: CallbackQuery, bot: Bot) -> None:
     user_id = callback.from_user.id
+
+    if db.is_user_blocked(user_id):
+        await callback.answer(BLOCKED_TEXT, show_alert=True)
+        return
+
     if await is_subscribed(bot, user_id):
         await callback.answer("✅ Rahmat, a'zo bo'lgansiz!")
         try:
@@ -156,6 +204,10 @@ async def admin_panel_denied(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("part:"))
 async def send_series_part(callback: CallbackQuery, bot: Bot) -> None:
+    if db.is_user_blocked(callback.from_user.id):
+        await callback.answer(BLOCKED_TEXT, show_alert=True)
+        return
+
     _, code, part_number = callback.data.split(":", 2)
     row = db.get_series_part(code, int(part_number))
     if row is None:
@@ -176,6 +228,10 @@ async def send_series_part(callback: CallbackQuery, bot: Bot) -> None:
 async def handle_film_code(message: Message, bot: Bot) -> None:
     user_id = message.from_user.id
     db.touch_user(user_id, message.from_user.username, message.from_user.full_name)
+
+    if db.is_user_blocked(user_id):
+        await message.answer(BLOCKED_TEXT)
+        return
 
     if not await is_subscribed(bot, user_id):
         await message.answer(JOIN_TEXT, reply_markup=subscribe_keyboard())

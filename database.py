@@ -3,6 +3,8 @@ import sqlite3
 from contextlib import closing
 from typing import Optional
 
+from config import ADMIN_IDS
+
 # Ma'lumotlar bazasi fayli. Hosting platformasida (Railway, Render va h.k.)
 # fayl tizimi har deploy'da tozalanadigan bo'lsa, DB_PATH ni persistent disk/volume
 # ichidagi papkaga ko'rsating (masalan, /data/kino.db), aks holda statistikalar
@@ -52,6 +54,18 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS admins (
+                user_id INTEGER PRIMARY KEY,
+                added_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        # .env dagi ADMIN_IDS ham admins jadvaliga qo'shib qo'yiladi, shunda
+        # "Admin qo'shish" orqali qo'shilgan adminlar bilan bitta ro'yxatda yuradi.
+        for admin_id in ADMIN_IDS:
+            conn.execute("INSERT OR IGNORE INTO admins (user_id) VALUES (?)", (admin_id,))
         conn.commit()
 
 
@@ -194,3 +208,37 @@ def total_views() -> int:
     with closing(_connect()) as conn:
         cur = conn.execute("SELECT COALESCE(SUM(views), 0) AS s FROM movies")
         return cur.fetchone()["s"]
+
+
+def delete_movie(code: str) -> None:
+    """Kino/serialni va uning barcha qismlarini bazadan butunlay o'chiradi."""
+    with closing(_connect()) as conn:
+        conn.execute("DELETE FROM movies WHERE code = ?", (code,))
+        conn.execute("DELETE FROM series_parts WHERE code = ?", (code,))
+        conn.commit()
+
+
+# ---------- Adminlar ----------
+
+def is_admin(user_id: int) -> bool:
+    with closing(_connect()) as conn:
+        cur = conn.execute("SELECT 1 FROM admins WHERE user_id = ?", (user_id,))
+        return cur.fetchone() is not None
+
+
+def add_admin(user_id: int) -> None:
+    with closing(_connect()) as conn:
+        conn.execute("INSERT OR IGNORE INTO admins (user_id) VALUES (?)", (user_id,))
+        conn.commit()
+
+
+def remove_admin(user_id: int) -> None:
+    with closing(_connect()) as conn:
+        conn.execute("DELETE FROM admins WHERE user_id = ?", (user_id,))
+        conn.commit()
+
+
+def list_admins() -> list[int]:
+    with closing(_connect()) as conn:
+        cur = conn.execute("SELECT user_id FROM admins ORDER BY added_at ASC")
+        return [row["user_id"] for row in cur.fetchall()]

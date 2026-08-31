@@ -9,17 +9,23 @@ from aiogram.types import (
     Message,
 )
 
-from config import ADMIN_IDS, CHANNEL_USERNAME
+import database as db
+from config import ADMIN_IDS, ADMIN_USERNAME, CHANNEL_USERNAME
 
 router = Router()
 
 WELCOME_PHOTO = "assets/welcome.jpg"
 
 WELCOME_TEXT = (
-    "🎬 <b>Zangora Film</b> botiga xush kelibsiz!\n\n"
-    "Bu yerda siz eng sara filmlarni <b>kod</b> orqali topib, "
-    "bir zumda tomosha qilishingiz mumkin. ✨\n\n"
-    "👇 Film kodini yuboring va zavqlaning!"
+    "🎬 <b>ZANGORAFILM</b> ga xush kelibsiz! 🍿\n"
+    "Assalomu alaykum! 👋\n\n"
+    "Siz izlagan kino va seriallarni bizning bot orqali tez va oson "
+    "topishingiz mumkin. 🎞️\n"
+    "🔎 Kino kodini qidirish uchun pastdagi tugmalardan foydalaning.\n"
+    "🎟️ Kino kodini kiriting:\n\n"
+    "Masalan: <code>125</code>\n"
+    "✨ Kino kodini yozing va kerakli filmingizni bir zumda toping!\n\n"
+    "❤️ ZANGORAFILM — Sifatli kino, maroqli tomosha!"
 )
 
 JOIN_TEXT = (
@@ -28,9 +34,18 @@ JOIN_TEXT = (
     "so'ngra <b>✅ Tekshirish</b> tugmasini bosing."
 )
 
+CODE_NOT_FOUND_TEXT = (
+    "😕 Bunday kodli kino yoki serial topilmadi.\n"
+    "Kodni tekshirib, qaytadan yuboring."
+)
+
 
 def _channel_link() -> str:
     return f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
+
+
+def _admin_link() -> str:
+    return f"https://t.me/{ADMIN_USERNAME.lstrip('@')}"
 
 
 def subscribe_keyboard() -> InlineKeyboardMarkup:
@@ -42,13 +57,31 @@ def subscribe_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def main_menu_keyboard() -> InlineKeyboardMarkup:
+def main_menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
+    bottom_row = [InlineKeyboardButton(text="📢 Reklama", url=_admin_link())]
+    if is_admin:
+        bottom_row.append(
+            InlineKeyboardButton(text="⚙️ Admin panel", callback_data="admin_panel")
+        )
+
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🎬 Kino kodlari", url=_channel_link())],
-            [InlineKeyboardButton(text="⚙️ Admin panel", callback_data="admin_panel")],
+            bottom_row,
         ]
     )
+
+
+def series_parts_keyboard(code: str, parts: list) -> InlineKeyboardMarkup:
+    buttons = [
+        InlineKeyboardButton(
+            text=f"{row['part_number']}-qism", callback_data=f"part:{code}:{row['part_number']}"
+        )
+        for row in parts
+    ]
+    # Har qatorda 3 tadan tugma
+    rows = [buttons[i : i + 3] for i in range(0, len(buttons), 3)]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def is_subscribed(bot: Bot, user_id: int) -> bool:
@@ -61,21 +94,22 @@ async def is_subscribed(bot: Bot, user_id: int) -> bool:
         return False
 
 
-async def send_welcome(bot: Bot, chat_id: int) -> None:
+async def send_welcome(bot: Bot, chat_id: int, user_id: int) -> None:
     photo = FSInputFile(WELCOME_PHOTO)
     await bot.send_photo(
         chat_id=chat_id,
         photo=photo,
         caption=WELCOME_TEXT,
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(is_admin=user_id in ADMIN_IDS),
     )
 
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, bot: Bot) -> None:
     user_id = message.from_user.id
+    db.touch_user(user_id, message.from_user.username, message.from_user.full_name)
     if await is_subscribed(bot, user_id):
-        await send_welcome(bot, message.chat.id)
+        await send_welcome(bot, message.chat.id, user_id)
     else:
         await message.answer(JOIN_TEXT, reply_markup=subscribe_keyboard())
 
@@ -89,32 +123,55 @@ async def check_subscription(callback: CallbackQuery, bot: Bot) -> None:
             await callback.message.delete()
         except TelegramBadRequest:
             pass
-        await send_welcome(bot, callback.message.chat.id)
+        await send_welcome(bot, callback.message.chat.id, user_id)
     else:
         await callback.answer("❌ Siz hali kanalga a'zo bo'lmagansiz!", show_alert=True)
 
 
-@router.callback_query(F.data == "admin_panel")
-async def open_admin_panel(callback: CallbackQuery) -> None:
-    if callback.from_user.id in ADMIN_IDS:
-        await callback.answer()
-        await callback.message.answer(
-            "⚙️ <b>Admin panel</b>\n\nBu bo'lim keyingi bosqichda to'ldiriladi."
-        )
-    else:
-        await callback.answer("🚫 Bu bo'lim faqat admin uchun.", show_alert=True)
+@router.callback_query(F.data.startswith("part:"))
+async def send_series_part(callback: CallbackQuery, bot: Bot) -> None:
+    _, code, part_number = callback.data.split(":", 2)
+    row = db.get_series_part(code, int(part_number))
+    if row is None:
+        await callback.answer("❌ Bu qism topilmadi.", show_alert=True)
+        return
+
+    await callback.answer()
+    await bot.send_video(chat_id=callback.message.chat.id, video=row["file_id"])
+    db.increment_views(code)
+    db.increment_watched(callback.from_user.id)
 
 
 @router.message(F.text & ~F.text.startswith("/"))
 async def handle_film_code(message: Message, bot: Bot) -> None:
-    """Foydalanuvchi film kodi yuborganda ishlaydigan handler (keyingi bosqichda to'ldiriladi)."""
     user_id = message.from_user.id
+    db.touch_user(user_id, message.from_user.username, message.from_user.full_name)
+
     if not await is_subscribed(bot, user_id):
         await message.answer(JOIN_TEXT, reply_markup=subscribe_keyboard())
         return
 
-    # TODO: bazadan kod bo'yicha film qidirish keyingi bosqichda qo'shiladi
-    await message.answer(
-        "🔎 Kod qabul qilindi, lekin filmlar bazasi hali ulanmagan.\n"
-        "Bu funksiyani keyingi bosqichda birga qo'shamiz."
-    )
+    code = message.text.strip()
+    movie = db.get_movie(code)
+
+    if movie is None:
+        await message.answer(CODE_NOT_FOUND_TEXT)
+        return
+
+    if movie["type"] == "film":
+        await bot.send_video(
+            chat_id=message.chat.id,
+            video=movie["file_id"],
+            caption=movie["caption"] or None,
+        )
+        db.increment_views(code)
+        db.increment_watched(user_id)
+    else:
+        parts = db.get_series_parts(code)
+        if not parts:
+            await message.answer(CODE_NOT_FOUND_TEXT)
+            return
+        await message.answer(
+            movie["caption"] or f"📺 Serial — kod: <code>{code}</code>\nQismni tanlang:",
+            reply_markup=series_parts_keyboard(code, parts),
+        )

@@ -5,11 +5,19 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 import database as db
-from config import ADMIN_IDS
 
 router = Router()
-router.message.filter(F.from_user.id.in_(ADMIN_IDS))
-router.callback_query.filter(F.from_user.id.in_(ADMIN_IDS))
+
+
+async def _is_admin(event) -> bool:
+    # Bazadan tekshiriladi (statik ADMIN_IDS ham init_db orqali shu jadvalga
+    # qo'shib qo'yilgan), shu sababli "Admin qo'shish" orqali qo'shilgan yangi
+    # admin ham qayta ishga tushirmasdan darhol to'liq panelga ega bo'ladi.
+    return db.is_admin(event.from_user.id)
+
+
+router.message.filter(_is_admin)
+router.callback_query.filter(_is_admin)
 
 
 class AddContent(StatesGroup):
@@ -24,11 +32,22 @@ class UserSearch(StatesGroup):
     waiting_user_id = State()
 
 
+class DeleteMovie(StatesGroup):
+    waiting_code = State()
+
+
+class AddAdmin(StatesGroup):
+    waiting_id = State()
+
+
 def admin_panel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="👥 Foydalanuvchilarni nazorat qilish", callback_data="admin_users")],
             [InlineKeyboardButton(text="🎬 Kino joylash", callback_data="admin_add_content")],
+            [InlineKeyboardButton(text="🗑 Kinoni o'chirish", callback_data="admin_delete_movie")],
+            [InlineKeyboardButton(text="➕ Admin qo'shish", callback_data="admin_add_admin")],
+            [InlineKeyboardButton(text="📋 Adminlar ro'yxati", callback_data="admin_list")],
             [InlineKeyboardButton(text="📊 Statistika", callback_data="admin_stats")],
         ]
     )
@@ -255,6 +274,102 @@ async def add_serial_part_invalid(message: Message) -> None:
         "❌ Iltimos, video yuboring yoki tugatish uchun /done deb yozing.",
         reply_markup=cancel_keyboard(),
     )
+
+
+# ---------- Kinoni o'chirish ----------
+
+@router.callback_query(F.data == "admin_delete_movie")
+async def admin_delete_movie_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await callback.answer()
+    await state.set_state(DeleteMovie.waiting_code)
+    await callback.message.answer(
+        "🗑 O'chirmoqchi bo'lgan kino/serial kodini kiriting:",
+        reply_markup=cancel_keyboard(),
+    )
+
+
+@router.message(StateFilter(DeleteMovie.waiting_code))
+async def admin_delete_movie_code(message: Message, state: FSMContext) -> None:
+    code = (message.text or "").strip()
+    await state.clear()
+
+    if not code:
+        await message.answer("❌ Kod bo'sh bo'lishi mumkin emas.")
+        return
+
+    movie = db.get_movie(code)
+    if movie is None:
+        await message.answer(f"😕 <code>{code}</code> kodli kino topilmadi.")
+        return
+
+    type_label = "Film" if movie["type"] == "film" else "Serial"
+    views = movie["views"]
+    db.delete_movie(code)
+    await message.answer(
+        f"✅ <code>{code}</code> kodli {type_label.lower()} butunlay o'chirildi.\n"
+        f"👁 O'chirilgunga qadar ko'rishlar soni: {views}"
+    )
+
+
+# ---------- Admin qo'shish ----------
+
+@router.callback_query(F.data == "admin_add_admin")
+async def admin_add_admin_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await callback.answer()
+    await state.set_state(AddAdmin.waiting_id)
+    await callback.message.answer(
+        "➕ Yangi admin qilmoqchi bo'lgan foydalanuvchining Telegram ID sini yuboring:\n"
+        "(ID ni bilish uchun foydalanuvchi @userinfobot ga /start yozishi mumkin)",
+        reply_markup=cancel_keyboard(),
+    )
+
+
+@router.message(StateFilter(AddAdmin.waiting_id))
+async def admin_add_admin_id(message: Message, state: FSMContext, bot: Bot) -> None:
+    text = (message.text or "").strip()
+    await state.clear()
+
+    if not text.lstrip("-").isdigit():
+        await message.answer("❌ Iltimos, faqat raqamli Telegram ID yuboring.")
+        return
+
+    new_id = int(text)
+    if db.is_admin(new_id):
+        await message.answer("⚠️ Bu foydalanuvchi allaqachon admin.")
+        return
+
+    db.add_admin(new_id)
+    await message.answer(
+        f"✅ <code>{new_id}</code> endi admin!\n"
+        "U botga /start yozganda (yoki qayta yozganda) to'liq admin panelga ega bo'ladi."
+    )
+
+    try:
+        await bot.send_message(
+            new_id,
+            "🎉 Tabriklaymiz! Sizga ushbu botda <b>admin huquqi</b> berildi.\n"
+            "Admin panelga kirish uchun botga /start deb yozing.",
+        )
+    except Exception:
+        # Yangi admin botni bloklagan yoki hali botga /start bosmagan bo'lishi mumkin
+        pass
+
+
+@router.callback_query(F.data == "admin_list")
+async def admin_list_view(callback: CallbackQuery) -> None:
+    await callback.answer()
+    admins = db.list_admins()
+
+    lines = ["📋 <b>Adminlar ro'yxati</b>\n"]
+    if admins:
+        for i, admin_id in enumerate(admins, start=1):
+            lines.append(f"{i}. <code>{admin_id}</code>")
+    else:
+        lines.append("Hozircha adminlar yo'q.")
+
+    await callback.message.answer("\n".join(lines))
 
 
 # ---------- Statistika ----------

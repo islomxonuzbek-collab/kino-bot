@@ -1,3 +1,5 @@
+import asyncio
+
 from aiogram import Router, F, Bot
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
@@ -40,6 +42,10 @@ class AddAdmin(StatesGroup):
     waiting_id = State()
 
 
+class Broadcast(StatesGroup):
+    waiting_content = State()
+
+
 def admin_panel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -49,8 +55,17 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="➕ Admin qo'shish", callback_data="admin_add_admin")],
             [InlineKeyboardButton(text="📋 Adminlar ro'yxati", callback_data="admin_list")],
             [InlineKeyboardButton(text="📊 Statistika", callback_data="admin_stats")],
+            [InlineKeyboardButton(text="📨 Xabar yuborish", callback_data="admin_broadcast")],
         ]
     )
+
+
+def user_block_keyboard(user_id: int, blocked: bool) -> InlineKeyboardMarkup:
+    if blocked:
+        text, cb = "✅ Blokdan chiqarish", f"admin_unblock:{user_id}"
+    else:
+        text, cb = "🚫 Botdan bloklash", f"admin_block:{user_id}"
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=text, callback_data=cb)]])
 
 
 def add_content_type_keyboard() -> InlineKeyboardMarkup:
@@ -130,11 +145,39 @@ async def admin_search_user_result(message: Message, state: FSMContext) -> None:
         return
 
     uname = f"@{row['username']}" if row["username"] else row["full_name"] or "—"
+    blocked = bool(row["is_blocked"])
+    status = "🚫 Bloklangan" if blocked else "✅ Faol"
     await message.answer(
         f"🆔 <code>{row['user_id']}</code>\n"
         f"👤 {uname}\n"
-        f"🎬 Ko'rilgan kinolar soni: <b>{row['watched_count']}</b>"
+        f"🎬 Ko'rilgan kinolar soni: <b>{row['watched_count']}</b>\n"
+        f"📌 Holati: <b>{status}</b>",
+        reply_markup=user_block_keyboard(row["user_id"], blocked),
     )
+
+
+# ---------- Foydalanuvchini bloklash / blokdan chiqarish ----------
+
+@router.callback_query(F.data.startswith("admin_block:"))
+async def admin_block_user(callback: CallbackQuery) -> None:
+    target_id = int(callback.data.split(":", 1)[1])
+    db.block_user(target_id)
+    await callback.answer("🚫 Foydalanuvchi bloklandi.", show_alert=True)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=user_block_keyboard(target_id, blocked=True))
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("admin_unblock:"))
+async def admin_unblock_user(callback: CallbackQuery) -> None:
+    target_id = int(callback.data.split(":", 1)[1])
+    db.unblock_user(target_id)
+    await callback.answer("✅ Foydalanuvchi blokdan chiqarildi.", show_alert=True)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=user_block_keyboard(target_id, blocked=False))
+    except Exception:
+        pass
 
 
 # ---------- Bekor qilish ----------
@@ -389,3 +432,41 @@ async def admin_stats(callback: CallbackQuery) -> None:
         f"👁 Jami ko'rishlar/yuklab olishlar: <b>{total_views}</b>"
     )
     await callback.message.answer(text)
+
+
+# ---------- Xabar yuborish (hammaga broadcast) ----------
+
+@router.callback_query(F.data == "admin_broadcast")
+async def admin_broadcast_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await callback.answer()
+    await state.set_state(Broadcast.waiting_content)
+    await callback.message.answer(
+        "📨 Barcha foydalanuvchilarga yuboriladigan xabarni yuboring.\n"
+        "Matn, rasm, video, ovozli xabar — istalgan turdagi xabarni yuborishingiz mumkin.\n"
+        "Xabar aynan qanday yuborsangiz, foydalanuvchilarga ham shundayligicha yetib boradi.",
+        reply_markup=cancel_keyboard(),
+    )
+
+
+@router.message(StateFilter(Broadcast.waiting_content))
+async def admin_broadcast_send(message: Message, state: FSMContext, bot: Bot) -> None:
+    await state.clear()
+    user_ids = db.get_all_user_ids()
+    await message.answer(f"⏳ Yuborilmoqda... Jami: {len(user_ids)} ta foydalanuvchiga.")
+
+    success = 0
+    failed = 0
+    for user_id in user_ids:
+        try:
+            await message.copy_to(chat_id=user_id)
+            success += 1
+        except Exception:
+            failed += 1
+        await asyncio.sleep(0.05)  # Telegram flood-limitiga tushib qolmaslik uchun
+
+    await message.answer(
+        "✅ <b>Xabar yuborish yakunlandi!</b>\n\n"
+        f"✔️ Yetib bordi: <b>{success}</b>\n"
+        f"❌ Yetib bormadi (bloklagan/o'chirilgan): <b>{failed}</b>"
+    )

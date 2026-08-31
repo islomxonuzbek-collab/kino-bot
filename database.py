@@ -80,6 +80,19 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS movie_reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                username TEXT,
+                full_name TEXT,
+                movie_name TEXT NOT NULL,
+                comment_text TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
         # .env dagi ADMIN_IDS ham admins jadvaliga qo'shib qo'yiladi, shunda
         # "Admin qo'shish" orqali qo'shilgan adminlar bilan bitta ro'yxatda yuradi.
         for admin_id in ADMIN_IDS:
@@ -280,6 +293,38 @@ def count_movie_requests() -> int:
     with closing(_connect()) as conn:
         cur = conn.execute("SELECT COUNT(*) AS c FROM movie_requests")
         return cur.fetchone()["c"]
+
+
+# ---------- Fikrlar ("kino nomi + izoh" ro'yxati, screenshot uslubida) ----------
+
+def add_movie_review(
+    user_id: int, username: Optional[str], full_name: Optional[str], movie_name: str, comment_text: str
+) -> None:
+    with closing(_connect()) as conn:
+        conn.execute(
+            """
+            INSERT INTO movie_reviews (user_id, username, full_name, movie_name, comment_text)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (user_id, username, full_name, movie_name, comment_text),
+        )
+        conn.commit()
+
+
+def count_movie_reviews() -> int:
+    with closing(_connect()) as conn:
+        cur = conn.execute("SELECT COUNT(*) AS c FROM movie_reviews")
+        return cur.fetchone()["c"]
+
+
+def get_movie_reviews_page(offset: int, limit: int) -> list[sqlite3.Row]:
+    """Eng yangi fikrlar birinchi bo'lib chiqadi (id DESC), sahifalab olinadi."""
+    with closing(_connect()) as conn:
+        cur = conn.execute(
+            "SELECT * FROM movie_reviews ORDER BY id DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        )
+        return cur.fetchall()
 
 
 # ---------- Adminlar ----------

@@ -68,6 +68,18 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS movie_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                username TEXT,
+                full_name TEXT,
+                request_text TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
         # .env dagi ADMIN_IDS ham admins jadvaliga qo'shib qo'yiladi, shunda
         # "Admin qo'shish" orqali qo'shilgan adminlar bilan bitta ro'yxatda yuradi.
         for admin_id in ADMIN_IDS:
@@ -248,6 +260,26 @@ def delete_movie(code: str) -> None:
         conn.execute("DELETE FROM movies WHERE code = ?", (code,))
         conn.execute("DELETE FROM series_parts WHERE code = ?", (code,))
         conn.commit()
+
+
+# ---------- Kino/serial so'rovlari ("Qanday kino kerak?") ----------
+
+def add_movie_request(user_id: int, username: Optional[str], full_name: Optional[str], text: str) -> None:
+    with closing(_connect()) as conn:
+        conn.execute(
+            """
+            INSERT INTO movie_requests (user_id, username, full_name, request_text)
+            VALUES (?, ?, ?, ?)
+            """,
+            (user_id, username, full_name, text),
+        )
+        conn.commit()
+
+
+def count_movie_requests() -> int:
+    with closing(_connect()) as conn:
+        cur = conn.execute("SELECT COUNT(*) AS c FROM movie_requests")
+        return cur.fetchone()["c"]
 
 
 # ---------- Adminlar ----------

@@ -1,10 +1,12 @@
 import asyncio
 from datetime import datetime
 from html import escape
+from typing import Optional
+from urllib.parse import quote
 
 from aiogram import Router, F, Bot
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import CommandStart, StateFilter
+from aiogram.filters import CommandObject, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
@@ -17,6 +19,7 @@ from aiogram.types import (
 
 import database as db
 from config import ADMIN_USERNAME, CHANNEL_USERNAME
+from handlers.ui import open_panel, update_panel
 
 router = Router()
 
@@ -33,6 +36,10 @@ class MovieReview(StatesGroup):
 REVIEWS_PAGE_SIZE = 5
 
 WELCOME_PHOTO = "assets/welcome.jpg"
+
+# Do'stlarga ulashish tugmasi ishlashi uchun bot username kerak — bir marta
+# olib, shu yerda keshlab qo'yiladi (bot ishlab turgan davomida o'zgarmaydi).
+_bot_username_cache: Optional[str] = None
 
 
 def _pe(emoji: str, emoji_id: str) -> str:
@@ -153,11 +160,27 @@ def request_movie_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def after_movie_keyboard() -> InlineKeyboardMarkup:
-    # Kino/qism yuborilgandan so'ng uning tagida chiqadigan tugma —
-    # foydalanuvchini kanalga taklif qiladi.
+async def _get_bot_username(bot: Bot) -> str:
+    global _bot_username_cache
+    if _bot_username_cache is None:
+        me = await bot.get_me()
+        _bot_username_cache = me.username
+    return _bot_username_cache
+
+
+async def after_movie_keyboard(bot: Bot, code: str, title: Optional[str] = None) -> InlineKeyboardMarkup:
+    """Kino/qism yuborilgandan so'ng uning tagida chiqadigan tugmalar:
+    do'stlarga ulashish (Telegramning o'zining "ulashish" oynasi orqali,
+    istalgan chat/do'stga yuborish mumkin) va kanalga a'zo bo'lish."""
+    username = await _get_bot_username(bot)
+    deep_link = f"https://t.me/{username}?start={code}"
+    label = f"{title} — " if title else ""
+    share_text = f"{label}kino kodi: {code}"
+    share_url = f"https://t.me/share/url?url={quote(deep_link, safe='')}&text={quote(share_text, safe='')}"
+
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(text="📤 Do'stlarga ulashish", url=share_url)],
             [InlineKeyboardButton(text="📢 Kanalga a'zo bo'ling", url=_channel_link())],
         ]
     )
@@ -212,7 +235,7 @@ def _format_reviews_page(reviews: list, page: int, total: int) -> str:
 def series_parts_keyboard(code: str, parts: list) -> InlineKeyboardMarkup:
     buttons = [
         InlineKeyboardButton(
-            text=f"{row['part_number']}-qism", callback_data=f"part:{code}:{row['part_number']}"
+            text=f"▶️ {row['part_number']}-qism", callback_data=f"part:{code}:{row['part_number']}"
         )
         for row in parts
     ]
@@ -272,8 +295,46 @@ async def send_welcome(bot: Bot, chat_id: int, user_id: int) -> None:
     )
 
 
+async def deliver_code(bot: Bot, chat_id: int, user_id: int, code: str) -> None:
+    """Kod (film yoki serial) bo'yicha kontentni yuboradi. Bu funksiya kod matn
+    orqali kiritilganda ham, ulashilgan havola (deep link) orqali kirilganda
+    ham ishlatiladi — kino/serial doim odatdagidek, alohida xabar sifatida
+    yuboriladi (admin panel kabi "bitta oyna"ga aylantirilmaydi)."""
+    movie = db.get_movie(code)
+
+    if movie is None:
+        await bot.send_message(chat_id, CODE_NOT_FOUND_TEXT)
+        return
+
+    if movie["type"] == "film":
+        keyboard = await after_movie_keyboard(bot, code, movie["caption"])
+        await bot.send_video(
+            chat_id=chat_id,
+            video=movie["file_id"],
+            caption=movie["caption"] or None,
+            reply_markup=keyboard,
+        )
+        db.increment_views(code)
+        db.increment_watched(user_id)
+    else:
+        parts = db.get_series_parts(code)
+        if not parts:
+            await bot.send_message(chat_id, CODE_NOT_FOUND_TEXT)
+            return
+
+        name = movie["caption"] or f"Serial — kod: {code}"
+        text = f'{_pe("📺", "5373330964372004748")} <b>{escape(name)}</b>\n\nQismni tanlang:'
+        keyboard = series_parts_keyboard(code, parts)
+        poster = movie["poster_file_id"] if "poster_file_id" in movie.keys() else None
+
+        if poster:
+            await bot.send_photo(chat_id=chat_id, photo=poster, caption=text, reply_markup=keyboard)
+        else:
+            await bot.send_message(chat_id, text, reply_markup=keyboard)
+
+
 @router.message(CommandStart())
-async def cmd_start(message: Message, bot: Bot) -> None:
+async def cmd_start(message: Message, bot: Bot, state: FSMContext, command: CommandObject) -> None:
     user_id = message.from_user.id
     db.touch_user(user_id, message.from_user.username, message.from_user.full_name)
 
@@ -283,14 +344,21 @@ async def cmd_start(message: Message, bot: Bot) -> None:
 
     await notify_admins_about_start(bot, message.from_user)
 
-    if await is_subscribed(bot, user_id):
-        await send_welcome(bot, message.chat.id, user_id)
-    else:
+    code = (command.args or "").strip()
+
+    if not await is_subscribed(bot, user_id):
+        if code:
+            await state.update_data(pending_code=code)
         await message.answer(JOIN_TEXT, reply_markup=subscribe_keyboard())
+        return
+
+    await send_welcome(bot, message.chat.id, user_id)
+    if code:
+        await deliver_code(bot, message.chat.id, user_id, code)
 
 
 @router.callback_query(F.data == "check_sub")
-async def check_subscription(callback: CallbackQuery, bot: Bot) -> None:
+async def check_subscription(callback: CallbackQuery, bot: Bot, state: FSMContext) -> None:
     user_id = callback.from_user.id
 
     if db.is_user_blocked(user_id):
@@ -304,6 +372,12 @@ async def check_subscription(callback: CallbackQuery, bot: Bot) -> None:
         except TelegramBadRequest:
             pass
         await send_welcome(bot, callback.message.chat.id, user_id)
+
+        data = await state.get_data()
+        pending_code = data.get("pending_code")
+        if pending_code:
+            await state.update_data(pending_code=None)
+            await deliver_code(bot, callback.message.chat.id, user_id, pending_code)
     else:
         await callback.answer("❌ Siz hali kanalga a'zo bo'lmagansiz!", show_alert=True)
 
@@ -328,11 +402,15 @@ async def send_series_part(callback: CallbackQuery, bot: Bot) -> None:
         await callback.answer("❌ Bu qism topilmadi.", show_alert=True)
         return
 
+    movie = db.get_movie(code)
+    title = movie["caption"] if movie else None
+    keyboard = await after_movie_keyboard(bot, code, title)
+
     await callback.answer()
     await bot.send_video(
         chat_id=callback.message.chat.id,
         video=row["file_id"],
-        reply_markup=after_movie_keyboard(),
+        reply_markup=keyboard,
     )
     db.increment_views(code)
     db.increment_watched(callback.from_user.id)
@@ -344,9 +422,9 @@ async def request_movie(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer(BLOCKED_TEXT, show_alert=True)
         return
 
-    await state.clear()
+    await state.set_state(None)
     await callback.answer()
-    await callback.message.answer(REQUEST_MOVIE_TEXT, reply_markup=request_movie_keyboard())
+    await open_panel(callback, REQUEST_MOVIE_TEXT, request_movie_keyboard())
 
 
 @router.callback_query(F.data == "leave_request_comment")
@@ -357,7 +435,7 @@ async def leave_request_comment_start(callback: CallbackQuery, state: FSMContext
 
     await callback.answer()
     await state.set_state(MovieRequest.waiting_text)
-    await callback.message.answer(REQUEST_MOVIE_PROMPT_TEXT)
+    await open_panel(callback, REQUEST_MOVIE_PROMPT_TEXT)
 
 
 @router.callback_query(F.data.startswith("reviews_page:"))
@@ -374,13 +452,7 @@ async def show_reviews_page(callback: CallbackQuery) -> None:
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text="✍️ Fikr qoldirish", callback_data="add_review")]]
         )
-        if callback.message.text is not None:
-            try:
-                await callback.message.edit_text(REVIEWS_EMPTY_TEXT, reply_markup=keyboard)
-                return
-            except TelegramBadRequest:
-                pass
-        await callback.message.answer(REVIEWS_EMPTY_TEXT, reply_markup=keyboard)
+        await open_panel(callback, REVIEWS_EMPTY_TEXT, keyboard)
         return
 
     total_pages = max(1, (total + REVIEWS_PAGE_SIZE - 1) // REVIEWS_PAGE_SIZE)
@@ -391,13 +463,7 @@ async def show_reviews_page(callback: CallbackQuery) -> None:
     keyboard = reviews_keyboard(page, has_prev=page > 0, has_next=(page + 1) < total_pages)
 
     await callback.answer()
-    if callback.message.text is not None:
-        try:
-            await callback.message.edit_text(text, reply_markup=keyboard)
-            return
-        except TelegramBadRequest:
-            pass
-    await callback.message.answer(text, reply_markup=keyboard)
+    await open_panel(callback, text, keyboard)
 
 
 @router.callback_query(F.data == "add_review")
@@ -408,30 +474,30 @@ async def add_review_start(callback: CallbackQuery, state: FSMContext) -> None:
 
     await callback.answer()
     await state.set_state(MovieReview.waiting_movie_name)
-    await callback.message.answer(REVIEW_PROMPT_MOVIE_NAME_TEXT)
+    await open_panel(callback, REVIEW_PROMPT_MOVIE_NAME_TEXT)
 
 
 @router.message(StateFilter(MovieReview.waiting_movie_name))
-async def add_review_movie_name(message: Message, state: FSMContext) -> None:
+async def add_review_movie_name(message: Message, state: FSMContext, bot: Bot) -> None:
     if db.is_user_blocked(message.from_user.id):
-        await state.clear()
+        await state.set_state(None)
         await message.answer(BLOCKED_TEXT)
         return
 
     movie_name = (message.text or "").strip()
     if not movie_name:
-        await message.answer("❌ Iltimos, kino yoki serial nomini matn shaklida yozing.")
+        await update_panel(bot, message.chat.id, "❌ Iltimos, kino yoki serial nomini matn shaklida yozing.")
         return
 
     await state.update_data(movie_name=movie_name)
     await state.set_state(MovieReview.waiting_comment)
-    await message.answer(REVIEW_PROMPT_COMMENT_TEXT)
+    await update_panel(bot, message.chat.id, REVIEW_PROMPT_COMMENT_TEXT)
 
 
 @router.message(StateFilter(MovieReview.waiting_comment))
-async def add_review_comment(message: Message, state: FSMContext) -> None:
+async def add_review_comment(message: Message, state: FSMContext, bot: Bot) -> None:
     data = await state.get_data()
-    await state.clear()
+    await state.set_state(None)
 
     if db.is_user_blocked(message.from_user.id):
         await message.answer(BLOCKED_TEXT)
@@ -439,25 +505,23 @@ async def add_review_comment(message: Message, state: FSMContext) -> None:
 
     comment_text = (message.text or "").strip()
     if not comment_text:
-        await message.answer("❌ Iltimos, fikringizni matn shaklida yozing.")
+        await update_panel(bot, message.chat.id, "❌ Iltimos, fikringizni matn shaklida yozing.")
         return
 
     movie_name = data.get("movie_name", "").strip()
     if not movie_name:
-        await message.answer("❌ Xatolik yuz berdi, qaytadan urinib ko'ring.")
+        await update_panel(bot, message.chat.id, "❌ Xatolik yuz berdi, qaytadan urinib ko'ring.")
         return
 
     user = message.from_user
     db.add_movie_review(user.id, user.username, user.full_name, movie_name, comment_text)
 
-    await message.answer(REVIEW_THANKS_TEXT)
-
     total = db.count_movie_reviews()
     reviews = db.get_movie_reviews_page(offset=0, limit=REVIEWS_PAGE_SIZE)
     total_pages = max(1, (total + REVIEWS_PAGE_SIZE - 1) // REVIEWS_PAGE_SIZE)
-    text = _format_reviews_page(reviews, 0, total)
+    text = f"{REVIEW_THANKS_TEXT}\n\n{_format_reviews_page(reviews, 0, total)}"
     keyboard = reviews_keyboard(0, has_prev=False, has_next=total_pages > 1)
-    await message.answer(text, reply_markup=keyboard)
+    await update_panel(bot, message.chat.id, text, keyboard)
 
 
 async def _notify_admins_about_request(bot: Bot, user, text: str) -> None:
@@ -497,7 +561,7 @@ async def _broadcast_request_to_users(bot: Bot, user, text: str) -> None:
 
 @router.message(StateFilter(MovieRequest.waiting_text))
 async def leave_request_comment_save(message: Message, state: FSMContext, bot: Bot) -> None:
-    await state.clear()
+    await state.set_state(None)
 
     if db.is_user_blocked(message.from_user.id):
         await message.answer(BLOCKED_TEXT)
@@ -505,7 +569,7 @@ async def leave_request_comment_save(message: Message, state: FSMContext, bot: B
 
     text = (message.text or "").strip()
     if not text:
-        await message.answer("❌ Iltimos, matn shaklida yozing va qaytadan yuboring.")
+        await update_panel(bot, message.chat.id, "❌ Iltimos, matn shaklida yozing va qaytadan yuboring.")
         return
 
     user = message.from_user
@@ -514,7 +578,7 @@ async def leave_request_comment_save(message: Message, state: FSMContext, bot: B
     await _notify_admins_about_request(bot, user, text)
     await _broadcast_request_to_users(bot, user, text)
 
-    await message.answer(REQUEST_MOVIE_THANKS_TEXT)
+    await update_panel(bot, message.chat.id, REQUEST_MOVIE_THANKS_TEXT)
 
 
 @router.message(F.text & ~F.text.startswith("/"))
@@ -531,28 +595,4 @@ async def handle_film_code(message: Message, bot: Bot) -> None:
         return
 
     code = message.text.strip()
-    movie = db.get_movie(code)
-
-    if movie is None:
-        await message.answer(CODE_NOT_FOUND_TEXT)
-        return
-
-    if movie["type"] == "film":
-        await bot.send_video(
-            chat_id=message.chat.id,
-            video=movie["file_id"],
-            caption=movie["caption"] or None,
-            reply_markup=after_movie_keyboard(),
-        )
-        db.increment_views(code)
-        db.increment_watched(user_id)
-    else:
-        parts = db.get_series_parts(code)
-        if not parts:
-            await message.answer(CODE_NOT_FOUND_TEXT)
-            return
-        await message.answer(
-            movie["caption"]
-            or f'{_pe("📺", "5373330964372004748")} Serial — kod: <code>{code}</code>\nQismni tanlang:',
-            reply_markup=series_parts_keyboard(code, parts),
-        )
+    await deliver_code(bot, message.chat.id, user_id, code)

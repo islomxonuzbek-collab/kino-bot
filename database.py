@@ -43,13 +43,19 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS movies (
                 code TEXT PRIMARY KEY,
                 type TEXT NOT NULL,              -- 'film' | 'serial'
-                caption TEXT,
+                caption TEXT,                    -- film uchun izoh, serial uchun nomi
                 file_id TEXT,                    -- faqat 'film' uchun
+                poster_file_id TEXT,              -- serial uchun logo/plakat rasmi (ixtiyoriy)
                 views INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
+        # Eski bazalarda "movies" jadvali poster_file_id ustunisiz yaratilgan
+        # bo'lishi mumkin, shuning uchun bu yerda migratsiya qilamiz.
+        movie_cols = [row["name"] for row in conn.execute("PRAGMA table_info(movies)").fetchall()]
+        if "poster_file_id" not in movie_cols:
+            conn.execute("ALTER TABLE movies ADD COLUMN poster_file_id TEXT")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS series_parts (
@@ -194,15 +200,22 @@ def add_film(code: str, caption: Optional[str], file_id: str) -> None:
         conn.commit()
 
 
-def create_serial(code: str, caption: Optional[str] = None) -> None:
+def create_serial(code: str, name: str, poster_file_id: Optional[str] = None) -> None:
+    """Serialni (yoki uning nomi/logosini) yaratadi yoki yangilaydi.
+
+    Agar shu kod bilan serial allaqachon mavjud bo'lsa (masalan, unga yana
+    qism qo'shish uchun qayta ochilgan bo'lsa), nomi va logosi yangilanadi;
+    poster_file_id berilmagan (None) bo'lsa, avvalgi logo saqlanib qoladi.
+    """
     with closing(_connect()) as conn:
         conn.execute(
             """
-            INSERT INTO movies (code, type, caption)
-            VALUES (?, 'serial', ?)
-            ON CONFLICT(code) DO NOTHING
+            INSERT INTO movies (code, type, caption, poster_file_id)
+            VALUES (?, 'serial', ?, ?)
+            ON CONFLICT(code) DO UPDATE SET caption = excluded.caption,
+                                             poster_file_id = COALESCE(excluded.poster_file_id, movies.poster_file_id)
             """,
-            (code, caption),
+            (code, name, poster_file_id),
         )
         conn.commit()
 
